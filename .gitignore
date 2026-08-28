@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+transcript_*.json
+transcript_*.txt
+.DS_Store
+.venv/
