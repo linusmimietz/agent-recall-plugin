@@ -10,14 +10,20 @@ scanning, no auto-dial.
 ## Install
 
 ```bash
-hermes plugins install <owner>/hermes-recall-plugin
+hermes plugins install linusmimietz/hermes-recall-plugin
 hermes plugins enable hermes-recall-plugin
 ```
 
 You'll be prompted for `RECALL_API_KEY` and `RECALL_REGION` during install.
 
-Or clone it into `~/.hermes/plugins/` manually and add `hermes-recall-plugin`
-to `plugins.enabled` in `~/.hermes/config.yaml`.
+Or install it manually:
+
+```bash
+git clone https://github.com/linusmimietz/hermes-recall-plugin \
+  ~/.hermes/plugins/hermes-recall-plugin
+```
+
+then add `hermes-recall-plugin` to `plugins.enabled` in `~/.hermes/config.yaml`.
 
 ## Configuration
 
