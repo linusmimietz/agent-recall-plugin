@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "agent-recall",
+  "displayName": "Recall.ai Notetaker",
+  "version": "2.1.0",
+  "description": "Send a Recall.ai bot into a Zoom/Meet/Teams call, then fetch a speaker-labelled transcript. Explicit by design: only joins meeting URLs passed in, no calendar scanning.",
+  "author": {
+    "name": "Linus Mimietz"
+  },
+  "repository": "https://github.com/linusmimietz/agent-recall-plugin",
+  "license": "MIT",
+  "keywords": [
+    "meetings",
+    "transcription",
+    "notetaker",
+    "recall-ai",
+    "zoom",
+    "google-meet",
+    "microsoft-teams"
+  ],
+  "mcpServers": "./.mcp.json",
+  "userConfig": {
+    "recall_api_key": {
+      "type": "string",
+      "title": "Recall.ai API key",
+      "description": "From https://<region>.recall.ai/dashboard/developers/api-keys — region-scoped, so it must match the region below.",
+      "sensitive": true,
+      "required": true
+    },
+    "recall_region": {
+      "type": "string",
+      "title": "Recall.ai region",
+      "description": "us-east-1, us-west-2, eu-central-1 or ap-northeast-1. Must match the dashboard the key came from.",
+      "required": true
+    }
+  }
+}

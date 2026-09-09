@@ -1,6 +1,6 @@
 """Tool handlers.
 
-Handler contract, per the Hermes plugin guide:
+Handler contract — uniform so any agent loop can call these directly:
   * signature ``handler(args: dict, **kwargs) -> str``
   * always return a JSON string, for success and failure alike
   * never raise — catch everything and return an error object instead
@@ -25,6 +25,10 @@ from . import transcript as tx
 RETRY_BOT_SECONDS = 30
 RETRY_TRANSCRIPT_SECONDS = 15
 
+# GET /bot/ has no `limit` parameter, so the page size is Recall's default.
+# Trim locally instead of handing the model a hundred rows it did not ask for.
+RECENT_BOT_LIMIT = 10
+
 
 def _ok(**fields) -> str:
     return json.dumps({"success": True, **fields}, ensure_ascii=False)
@@ -41,6 +45,8 @@ def handler(func):
         del kwargs
         try:
             return func(args or {})
+        except api.RecallArgumentError as err:
+            return _err(str(err), kind="arguments")
         except api.RecallConfigError as err:
             return _err(str(err), kind="configuration")
         except api.RecallError as err:
@@ -61,12 +67,14 @@ def schedule_bot(args):
         return _err("meeting_url is required")
 
     join_at = api.parse_when(args.get("join_at"))
-    lead_seconds = api.seconds_until(join_at)
-    scheduled = lead_seconds > api.SCHEDULED_THRESHOLD_SECONDS
 
+    # Apply the lead-in first, then classify: it is the time in the request body
+    # that Recall judges, so a +605s ask lands at +590s and is really ad-hoc.
+    candidate = join_at - timedelta(seconds=api.JOIN_LEAD_SECONDS)
+    scheduled = api.seconds_until(candidate) > api.SCHEDULED_THRESHOLD_SECONDS
     if scheduled:
-        # Bots take a moment to boot, so aim slightly early.
-        join_at -= timedelta(seconds=api.JOIN_LEAD_SECONDS)
+        join_at = candidate
+    lead_seconds = api.seconds_until(join_at)
 
     name = api.bot_name()
     body = {
@@ -78,7 +86,7 @@ def schedule_bot(args):
         # URL here keeps listings readable for bots revisited much later.
         "metadata": {
             "meeting_url": meeting_url,
-            "scheduled_by": "hermes-recall-plugin",
+            "scheduled_by": "agent-recall",
             "scheduled_at": api.iso(datetime.now(timezone.utc)),
         },
         "automatic_leave": {
@@ -97,14 +105,22 @@ def schedule_bot(args):
         "bot_name": name,
         "meeting_url": meeting_url,
         "join_at": api.iso(join_at),
-        "joins_in": api.format_duration(lead_seconds),
+        "joins_in": api.format_offset(lead_seconds),
         "mode": "scheduled" if scheduled else "ad-hoc",
         "next_step": (
             "Someone may need to admit the bot from the meeting's waiting room. "
             "After the meeting ends, call recall_get_transcript with this bot_id."
         ),
     }
-    if not scheduled:
+    if lead_seconds < 0:
+        result["join_at_in_past"] = True
+        result["warning"] = (
+            f"The requested join time is {api.format_offset(lead_seconds)}, so "
+            f"the bot joins immediately. If you meant a future meeting, check "
+            f"the date — a bare date is read as local midnight, which is "
+            f"usually already behind you."
+        )
+    elif not scheduled:
         result["warning"] = (
             "Booked less than 10 minutes ahead, so this is an ad-hoc bot: it "
             "comes from a limited pool of warm machines, is capped at 30 "
@@ -119,6 +135,7 @@ def schedule_bot(args):
 # --------------------------------------------------------------------------
 
 _STATUS_MEANING = {
+    "ready": "Provisioned and about to join.",
     "joining_call": "Connecting to the meeting.",
     "in_waiting_room": (
         "Waiting to be admitted. A human must admit the bot from the meeting's "
@@ -126,8 +143,14 @@ _STATUS_MEANING = {
     ),
     "in_call_not_recording": "In the meeting but not recording yet.",
     "in_call_recording": "Recording.",
+    "recording_permission_allowed": "The host allowed recording.",
     "recording_permission_denied": "The host denied the bot's request to record.",
     "call_ended": "The call ended. Media may still be uploading.",
+    "recording_done": "The recording is complete and uploaded.",
+    "analysis_done": "Post-processing finished.",
+    "analysis_failed": "Post-processing failed; no transcript can be produced.",
+    "media_expired": "Recall has deleted this recording; it can no longer be "
+                     "transcribed or downloaded.",
     "done": "Finished — the recording is ready to transcribe.",
     "fatal": "The bot failed and could not continue.",
 }
@@ -135,19 +158,26 @@ _STATUS_MEANING = {
 
 @handler
 def bot_status(args):
-    bot_id = (args.get("bot_id") or "").strip()
-    if not bot_id:
-        return _err("bot_id is required")
+    bot_id = api.validate_bot_id(args.get("bot_id"))
 
     bot = api.request("GET", f"/bot/{bot_id}/")
     status = api.latest_status(bot)
     code = status.get("code")
     recording = api.first_recording(bot)
 
+    if code is None:
+        meaning = "Scheduled; has not started joining yet."
+    elif code in _STATUS_MEANING:
+        meaning = _STATUS_MEANING[code]
+    else:
+        # Recall documents that new codes appear without notice. Guessing
+        # "hasn't started yet" would be a confident lie about a finished bot.
+        meaning = f"Unrecognised status {code!r} — treat the bot's state as unknown."
+
     result = {
         "bot_id": bot_id,
         "status": code or "scheduled",
-        "meaning": _STATUS_MEANING.get(code, "Scheduled; has not started joining yet."),
+        "meaning": meaning,
         "meeting": api.describe_meeting(bot),
         "has_recording": recording is not None,
         "finished": code in api.TERMINAL_BOT_STATUSES,
@@ -170,6 +200,22 @@ def bot_status(args):
             f"Bot failed ({status.get('sub_code') or 'no sub_code'}). Inspect it at "
             f"https://{api.region()}.recall.ai/dashboard/explorer/bot/{bot_id}"
         )
+    elif code == "recording_permission_denied":
+        result["action_required"] = (
+            "The host denied the recording request. Ask a host to grant "
+            "recording permission, then schedule a new bot — this one will not "
+            "start recording on its own."
+        )
+    elif code == "media_expired":
+        result["next_step"] = (
+            "Nothing can be recovered for this bot — Recall has deleted the "
+            "media. Schedule a new bot for any future meeting."
+        )
+    elif code == "analysis_failed":
+        result["next_step"] = (
+            "Post-processing failed, so no transcript will be produced for this "
+            "recording."
+        )
     elif code == "done":
         result["next_step"] = (
             "Recording ready. Call recall_get_transcript with this bot_id."
@@ -177,7 +223,7 @@ def bot_status(args):
             "The bot finished without producing a recording — it most likely was "
             "never admitted to the meeting."
         )
-    elif not result["finished"]:
+    elif code is None or code in api.IN_PROGRESS_BOT_STATUSES:
         result["retry_after_seconds"] = RETRY_BOT_SECONDS
 
     return _ok(**result)
@@ -192,20 +238,21 @@ def list_bots(args):
     del args
     now = api.iso(datetime.now(timezone.utc))
 
-    upcoming = (api.request("GET", f"/bot/?join_at_after={now}") or {}).get("results", [])
+    upcoming, truncated = api.paginate(f"/bot/?join_at_after={now}")
     scheduled = []
     for bot in sorted(upcoming, key=lambda b: b.get("join_at") or ""):
+        if not bot.get("join_at"):
+            continue  # a row without a join time cannot be reported as upcoming
         join_at = api.parse_iso(bot["join_at"])
         scheduled.append({
             "bot_id": bot["id"],
             "meeting": api.describe_meeting(bot),
             "join_at": api.iso(join_at),
-            "joins_in": api.format_duration(api.seconds_until(join_at)),
+            "joins_in": api.format_offset(api.seconds_until(join_at)),
         })
 
-    recent_raw = (api.request("GET", "/bot/?limit=10") or {}).get("results", [])
     recent = []
-    for bot in recent_raw:
+    for bot in (api.request("GET", "/bot/") or {}).get("results") or []:
         if not api.is_dispatched(bot):
             continue
         recording = api.first_recording(bot)
@@ -215,9 +262,22 @@ def list_bots(args):
             "status": api.latest_status(bot).get("code", "unknown"),
             "has_recording": recording is not None,
         })
+        if len(recent) >= RECENT_BOT_LIMIT:
+            break
 
-    return _ok(scheduled=scheduled, recent=recent,
-               scheduled_count=len(scheduled), recent_count=len(recent))
+    result = {
+        "scheduled": scheduled,
+        "recent": recent,
+        "scheduled_count": len(scheduled),
+        "recent_count": len(recent),
+    }
+    if truncated:
+        result["scheduled_truncated"] = True
+        result["detail"] = (
+            f"More than {len(scheduled)} bots are scheduled; this is the first "
+            f"{api.MAX_LIST_PAGES} pages. Treat scheduled_count as a floor."
+        )
+    return _ok(**result)
 
 
 # --------------------------------------------------------------------------
@@ -226,9 +286,7 @@ def list_bots(args):
 
 @handler
 def get_transcript(args):
-    bot_id = (args.get("bot_id") or "").strip()
-    if not bot_id:
-        return _err("bot_id is required")
+    bot_id = api.validate_bot_id(args.get("bot_id"))
 
     try:
         preview_count = int(args.get("preview_utterances") or 20)
@@ -282,7 +340,22 @@ def get_transcript(args):
                        retry_after_seconds=RETRY_TRANSCRIPT_SECONDS,
                        detail="Transcription started. Call again shortly.")
 
-    parts = api.download(url)
+    try:
+        parts = api.download(url)
+    except api.RecallExpiredUrlError:
+        # The cached URL in media_shortcuts had gone stale; Recall mints a new
+        # one on request, so refresh once rather than reporting a dead end.
+        if not transcript_id:
+            raise
+        refreshed = api.request("GET", f"/transcript/{transcript_id}/")
+        fresh_url = (refreshed.get("data") or {}).get("download_url")
+        if not fresh_url:
+            return _ok(status="processing", bot_id=bot_id,
+                       transcript_id=transcript_id,
+                       transcript_status=(refreshed.get("status") or {}).get("code"),
+                       retry_after_seconds=RETRY_TRANSCRIPT_SECONDS)
+        parts = api.download(fresh_url)
+
     readable = tx.to_readable(parts)
     if not readable:
         return _ok(status="done", bot_id=bot_id, utterances=0, speakers=[],
@@ -329,18 +402,23 @@ def _start_transcription(recording_id: str) -> str:
 
 @handler
 def cancel_bot(args):
-    bot_id = (args.get("bot_id") or "").strip()
-    if not bot_id:
-        return _err("bot_id is required")
+    bot_id = api.validate_bot_id(args.get("bot_id"))
 
     bot = api.request("GET", f"/bot/{bot_id}/")
 
     # A scheduled bot Recall has not reserved yet can be deleted outright.
     if not api.is_dispatched(bot) and bot.get("join_at"):
         if api.seconds_until(api.parse_iso(bot["join_at"])) > api.SCHEDULED_THRESHOLD_SECONDS:
-            api.request("DELETE", f"/bot/{bot_id}/")
-            return _ok(bot_id=bot_id, action="deleted",
-                       detail="Scheduled bot deleted; it will not join.")
+            try:
+                api.request("DELETE", f"/bot/{bot_id}/")
+                return _ok(bot_id=bot_id, action="deleted",
+                           detail="Scheduled bot deleted; it will not join.")
+            except api.RecallHTTPError as err:
+                # 405 means Recall dispatched the bot between our read and the
+                # delete. Falling through to leave_call is the difference
+                # between cancelling it and leaving it to bill in a waiting room.
+                if err.status != 405:
+                    raise
 
     status = api.latest_status(bot).get("code")
     if status in api.TERMINAL_BOT_STATUSES:

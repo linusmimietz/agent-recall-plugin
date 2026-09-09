@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-recall"
+dynamic = ["version"]
+description = "Recall.ai meeting notetaker tools for any agent: schedule a bot into a Zoom/Meet/Teams call, then fetch a speaker-labelled transcript."
+authors = [{ name = "Linus Mimietz" }]
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+# 3.11 is the floor because datetime.fromisoformat before it accepts only what
+# isoformat() emits — it rejects the trailing-Z and basic-format timestamps the
+# schedule tool advertises.
+requires-python = ">=3.11"
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Communications :: Conferencing",
+  "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+# Stdlib only, deliberately: adding these tools to an agent must not drag an
+# HTTP library into its dependency tree.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/linusmimietz/agent-recall-plugin"
+
+[project.scripts]
+agent-recall = "agent_recall.cli:main"
+# Hosts that take tools over MCP (Grok, Claude Code, Cursor) spawn this one.
+agent-recall-mcp = "agent_recall.mcp_server:main"
+
+[tool.setuptools]
+packages = ["agent_recall"]
+
+[tool.setuptools.dynamic]
+version = { attr = "agent_recall.__version__" }

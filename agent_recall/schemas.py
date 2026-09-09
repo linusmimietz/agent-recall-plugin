@@ -1,13 +1,11 @@
 """Tool schemas — what the LLM reads to decide when to call each tool.
 
-Plugin skills are not listed in the system prompt's skill index, so each
-description points at ``recall:notetaker`` where the workflow actually matters.
+Plain ``{name, description, parameters}`` dicts, so they drop straight into any
+function-calling API. The descriptions carry the operational rules (lead time,
+waiting-room admission, transcription being a separate job) because a generic
+host has nowhere else to put them; ``SKILL.md`` covers the same ground at
+length for a system prompt.
 """
-
-_SKILL_HINT = (
-    "For the full workflow (scheduling lead time, waiting-room admission, "
-    "how speaker labels work), load the skill 'recall:notetaker'."
-)
 
 SCHEDULE_BOT = {
     "name": "recall_schedule_bot",
@@ -19,7 +17,7 @@ SCHEDULE_BOT = {
         "machine for scheduled bots so they join on time, while last-minute "
         "('ad-hoc') bots come from a small pool that can be exhausted.\n\n"
         "This does NOT transcribe. After the meeting ends, call "
-        "recall_get_transcript. " + _SKILL_HINT
+        "recall_get_transcript."
     ),
     "parameters": {
         "type": "object",

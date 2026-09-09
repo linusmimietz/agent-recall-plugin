@@ -1,22 +1,30 @@
-"""``hermes recall`` — the same operations as the tools, from a terminal.
+"""``agent-recall`` — the same operations as the tools, from a terminal.
 
-Useful for testing the plugin without going through the agent, and for one-off
-scheduling. Mirrors ``plugins/google_meet/cli.py``: ``register_cli`` builds the
-argparse tree, ``recall_command`` dispatches and returns an exit code.
+Useful for testing without going through an agent, and for one-off scheduling.
+``build_parser`` owns the whole argparse tree; ``main`` dispatches and returns
+an exit code, so it works both as a console script and via
+``python -m agent_recall``.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 
 from . import recall_api as api
 from . import tools
 
+PROG = "agent-recall"
 
-def register_cli(subparser: argparse.ArgumentParser) -> None:
-    """Build the ``hermes recall`` argparse tree."""
-    subs = subparser.add_subparsers(dest="recall_command")
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the ``agent-recall`` argparse tree."""
+    parser = argparse.ArgumentParser(
+        prog=PROG,
+        description="Send a Recall.ai bot to a meeting and fetch its transcript.",
+    )
+    subs = parser.add_subparsers(dest="command")
 
     schedule = subs.add_parser("schedule", help="Send a bot to a meeting")
     schedule.add_argument("meeting_url", help="Zoom / Meet / Teams URL")
@@ -39,6 +47,8 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
 
     cancel = subs.add_parser("cancel", help="Unschedule a bot or pull it from the call")
     cancel.add_argument("bot_id")
+
+    return parser
 
 
 def _emit(raw: str) -> int:
@@ -66,10 +76,17 @@ def _emit(raw: str) -> int:
     return 0
 
 
-def recall_command(args: argparse.Namespace) -> int:
-    sub = getattr(args, "recall_command", None)
-    if not sub:
-        print("usage: hermes recall {schedule,list,status,transcript,cancel}")
+def main(argv=None) -> int:
+    # Transcripts carry names and punctuation the locale codec may not cover;
+    # replacing an unencodable character beats aborting the whole command.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
+
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if not args.command:
+        parser.print_usage()
         return 2
 
     try:
@@ -79,18 +96,18 @@ def recall_command(args: argparse.Namespace) -> int:
         print(f"error: {err}")
         return 2
 
-    if sub == "schedule":
+    if args.command == "schedule":
         return _emit(tools.schedule_bot(
             {"meeting_url": args.meeting_url, "join_at": args.when}))
-    if sub == "list":
+    if args.command == "list":
         return _emit(tools.list_bots({}))
-    if sub == "status":
+    if args.command == "status":
         return _emit(tools.bot_status({"bot_id": args.bot_id}))
-    if sub == "transcript":
+    if args.command == "transcript":
         return _emit(tools.get_transcript(
             {"bot_id": args.bot_id, "preview_utterances": args.preview}))
-    if sub == "cancel":
+    if args.command == "cancel":
         return _emit(tools.cancel_bot({"bot_id": args.bot_id}))
 
-    print(f"unknown subcommand: {sub}")
+    parser.print_usage()
     return 2

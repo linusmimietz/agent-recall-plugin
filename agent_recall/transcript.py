@@ -9,27 +9,39 @@ and checked against real transcript output.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
-try:  # Inside a Hermes process this is the single source of truth.
-    from hermes_constants import get_hermes_home
-except ImportError:  # Standalone (tests, or the plugin imported directly).
-    import os
+# Agents lay out their workspaces differently, so the destination is
+# configuration rather than something inferred from the host: RECALL_OUTPUT_DIR
+# is what a host — or a test — sets to redirect transcripts out of the default
+# tree.
+DEFAULT_OUTPUT_DIR = Path.home() / ".agent" / "workspace" / "recall"
 
-    def get_hermes_home() -> Path:
-        """Mirror hermes_constants' resolution: HERMES_HOME env, else default.
 
-        Deliberately honours HERMES_HOME rather than hardcoding ~/.hermes —
-        otherwise a test or a non-default profile silently writes transcripts
-        into the wrong tree.
-        """
-        override = (os.environ.get("HERMES_HOME") or "").strip()
-        return Path(override) if override else Path.home() / ".hermes"
+def base_dir() -> Path:
+    """The transcript root: ``$RECALL_OUTPUT_DIR``, else the default tree."""
+    override = (os.environ.get("RECALL_OUTPUT_DIR") or "").strip()
+    return Path(override).expanduser() if override else DEFAULT_OUTPUT_DIR
+
+
+def _safe_segment(bot_id: str) -> str:
+    """Reject anything that would not stay inside the output directory.
+
+    Callers validate bot ids before reaching here; this is the guard at the
+    filesystem boundary itself, so a path such as ``../../x`` cannot escape even
+    if a caller forgets.
+    """
+    segment = str(bot_id or "").strip()
+    if (not segment or segment.startswith(".")
+            or "/" in segment or "\\" in segment or "\x00" in segment):
+        raise ValueError(f"Unsafe transcript directory name: {bot_id!r}")
+    return segment
 
 
 def output_dir(bot_id: str) -> Path:
-    """Where transcripts land: ``$HERMES_HOME/workspace/recall/<bot_id>/``."""
-    return Path(get_hermes_home()) / "workspace" / "recall" / bot_id
+    """Where transcripts land: ``$RECALL_OUTPUT_DIR/<bot_id>/``."""
+    return base_dir() / _safe_segment(bot_id)
 
 
 def participant_key(participant: dict):
@@ -92,6 +104,24 @@ def as_text(readable) -> str:
     return "\n\n".join(transcript_line(item) for item in readable) + "\n"
 
 
+def _write_atomic(path: Path, text: str) -> None:
+    """Write UTF-8 through a temp file, then rename over the target.
+
+    Both halves matter. Without an explicit encoding, Path.write_text uses the
+    locale's codec, so a participant named 山田 or a curly apostrophe raises
+    UnicodeEncodeError on a cp1252 or latin-1 system. And because the open()
+    truncates before the encode fails, writing in place would destroy a good
+    transcript from a previous run — after the user has already paid Recall to
+    generate it. The rename is atomic, so the previous file survives a failure.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def write_outputs(bot_id: str, raw_parts, readable):
     """Write both the readable transcript and the raw JSON. Returns their paths."""
     directory = output_dir(bot_id)
@@ -100,8 +130,8 @@ def write_outputs(bot_id: str, raw_parts, readable):
     raw_path = directory / "transcript.json"
     text_path = directory / "transcript.txt"
 
-    raw_path.write_text(json.dumps(raw_parts, indent=2, ensure_ascii=False))
-    text_path.write_text(as_text(readable))
+    _write_atomic(raw_path, json.dumps(raw_parts, indent=2, ensure_ascii=False))
+    _write_atomic(text_path, as_text(readable))
 
     return text_path, raw_path
 

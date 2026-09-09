@@ -1,0 +1,22 @@
+{
+  "$schema": "https://code.claude.com/schemas/marketplace.json",
+  "name": "linusmimietz-plugins",
+  "owner": {
+    "name": "Linus Mimietz",
+    "url": "https://github.com/linusmimietz"
+  },
+  "description": "Meeting-notetaker tooling for agents.",
+  "plugins": [
+    {
+      "name": "agent-recall",
+      "source": "./",
+      "displayName": "Recall.ai Notetaker",
+      "description": "Send a Recall.ai bot into a Zoom/Meet/Teams call, then fetch a speaker-labelled transcript.",
+      "category": "productivity",
+      "license": "MIT",
+      "author": {
+        "name": "Linus Mimietz"
+      }
+    }
+  ]
+}
