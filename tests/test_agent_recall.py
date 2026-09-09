@@ -618,6 +618,11 @@ class ManifestTests(unittest.TestCase):
                          {"recall_api_key", "recall_region"})
         self.assertTrue(manifest["userConfig"]["recall_api_key"]["sensitive"])
 
+    def test_bundled_skill_is_named_recall(self):
+        skill = REPO / "skills/recall/SKILL.md"
+        self.assertTrue(skill.is_file(), "skills/<name>/SKILL.md is where hosts look")
+        self.assertIn("name: recall", skill.read_text(encoding="utf-8"))
+
     def test_license_file_exists(self):
         """M11: an MIT declaration with no license text."""
         self.assertIn("MIT License", (REPO / "LICENSE").read_text())

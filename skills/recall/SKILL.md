@@ -1,5 +1,5 @@
 ---
-name: notetaker
+name: recall
 description: Record and transcribe a meeting with Recall.ai — scheduling lead time, waiting-room admission, and how speaker labels are produced.
 when-to-use: When the user wants a meeting recorded, transcribed or summarised from a Zoom, Google Meet or Microsoft Teams link, or asks about a notetaker bot already scheduled or sitting in a call.
 metadata:

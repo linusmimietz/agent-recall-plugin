@@ -18,7 +18,7 @@ scanning, no auto-dial.
 These hosts don't load Python plugins — they spawn an MCP server and talk
 JSON-RPC to it. This repo ships one, plus the manifests that wire it up.
 
-**As a plugin** (also installs the `notetaker` skill):
+**As a plugin** (also installs the `recall` skill):
 
 ```bash
 grok plugin marketplace add linusmimietz/agent-recall-plugin
@@ -39,7 +39,7 @@ environment. Four files do the wiring, if you would rather set it up by hand:
 | `.mcp.json` | Declares the `recall` stdio server |
 | `.claude-plugin/plugin.json` | Plugin manifest; points at `.mcp.json`, prompts for credentials |
 | `.claude-plugin/marketplace.json` | Makes the repo installable as a marketplace |
-| `skills/notetaker/SKILL.md` | The bundled skill |
+| `skills/recall/SKILL.md` | The bundled skill |
 
 Both routes run the `agent-recall-mcp` console script rather than
 `python3 -m agent_recall.mcp_server`. That is deliberate: `-m` puts the spawning
@@ -142,10 +142,10 @@ Other shapes work the same way — Anthropic wants `input_schema` instead of
 `HANDLERS` (name → callable). Handlers never raise: failures come back as
 `{"success": false, "error": ...}`, so a bad tool call cannot break the loop.
 
-`skills/notetaker/SKILL.md` covers the workflow in more depth — scheduling lead
+`skills/recall/SKILL.md` covers the workflow in more depth — scheduling lead
 time, waiting-room admission, how speaker labels are produced. Installing the
-plugin registers it as the `notetaker` skill (`/notetaker` in Grok); otherwise
-paste it into your system prompt.
+plugin registers it as the `recall` skill (`/recall` in Grok); otherwise paste it
+into your system prompt.
 
 ## Tools
 
