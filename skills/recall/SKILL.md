@@ -51,7 +51,9 @@ transcript until `recall_get_transcript` starts one. It is not automatic.
 - `status: "processing"` with `retry_after_seconds` — the meeting is still
   running, or transcription is still working. Come back after roughly that long.
   Do not spin on it; if the meeting is still in progress, tell the user and stop.
-- `status: "done"` — with the speakers, a preview, and a path on disk.
+- `status: "done"` — with the speakers and the transcript text itself. A long
+  transcript comes in pages: while `has_more` is true, call again with
+  `offset` set to `next_offset` and read on.
 
 Calling it repeatedly is safe: an existing transcript is reused rather than
 re-transcribed. Re-transcribing costs money.

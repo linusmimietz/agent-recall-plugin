@@ -3,7 +3,7 @@
 Stdlib only — no third-party HTTP dependency, so the plugin adds nothing to the
 agent's dependency tree.
 
-Configuration comes entirely from the environment:
+Configuration comes from the environment, or per request from ``credentials``:
 
     RECALL_API_KEY   required, region-scoped
     RECALL_REGION    required, one of the four Recall regions
@@ -12,6 +12,8 @@ Configuration comes entirely from the environment:
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import os
 import re
@@ -114,8 +116,29 @@ class RecallExpiredUrlError(RecallError):
 # Configuration
 # --------------------------------------------------------------------------
 
+# Per-request configuration set by the HTTP transport, where each request
+# carries its caller's key. A ContextVar rather than a global because requests
+# are served on concurrent threads, and each must see only its own key.
+_overrides: contextvars.ContextVar = contextvars.ContextVar(
+    "agent_recall_overrides", default=None)
+
+
+@contextlib.contextmanager
+def credentials(**values):
+    """Use ``values`` (e.g. ``RECALL_API_KEY="..."``) ahead of the environment.
+
+    Names left out, or set empty, still fall back to the environment, so a
+    server can supply the region while each caller supplies the key.
+    """
+    token = _overrides.set({k: str(v).strip() for k, v in values.items() if v})
+    try:
+        yield
+    finally:
+        _overrides.reset(token)
+
+
 def _env(name: str) -> str:
-    """Read configuration from the environment.
+    """Read configuration: per-request overrides first, then the environment.
 
     A host that prompts for plugin configuration (Claude Code's ``userConfig``)
     exports the answers as ``CLAUDE_PLUGIN_OPTION_<NAME>`` to the MCP
@@ -124,6 +147,9 @@ def _env(name: str) -> str:
     the placeholder would set the variable to the literal text and mask a
     correctly exported one.
     """
+    override = (_overrides.get() or {}).get(name)
+    if override:
+        return override
     for key in (name, f"CLAUDE_PLUGIN_OPTION_{name}"):
         value = (os.environ.get(key) or "").strip()
         if value:
@@ -135,12 +161,12 @@ def region() -> str:
     value = _env("RECALL_REGION")
     if not value:
         raise RecallConfigError(
-            "RECALL_REGION is not set. Choose the region your Recall workspace "
-            f"lives in: {', '.join(REGIONS)}."
+            "RECALL_REGION (or the X-Recall-Region header) is not set. Choose "
+            f"the region your Recall workspace lives in: {', '.join(REGIONS)}."
         )
     if value not in REGIONS:
         raise RecallConfigError(
-            f"RECALL_REGION={value!r} is not a Recall region. "
+            f"Region {value!r} is not a Recall region. "
             f"Expected one of: {', '.join(REGIONS)}."
         )
     return value
@@ -253,9 +279,9 @@ def request(method: str, path: str, body=None, max_attempts: int = 4):
 
             if err.code == 401:
                 raise RecallError(
-                    f"401 Unauthorized. RECALL_API_KEY is not valid for region "
-                    f"{region()} — Recall keys are region-scoped, so check that "
-                    f"RECALL_REGION matches the dashboard the key came from."
+                    f"401 Unauthorized. The Recall API key is not valid for "
+                    f"region {region()} — Recall keys are region-scoped, so check "
+                    f"that the region matches the dashboard the key came from."
                 ) from err
             if err.code == 404:
                 raise RecallError(f"404 Not Found: {url}") from err

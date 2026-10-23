@@ -17,10 +17,11 @@ and ``dispatch`` runs one by name, which is all any agent needs::
     result = dispatch(call.function.name, json.loads(call.function.arguments))
     # -> a JSON string, ready to hand back as the tool message
 
-All configuration is environment-driven: ``RECALL_API_KEY`` and
-``RECALL_REGION`` are required, ``RECALL_BOT_NAME`` and ``RECALL_OUTPUT_DIR``
-are optional. Call ``is_configured()`` if you would rather hide the tools than
-offer ones that cannot work.
+Configuration is environment-driven: ``RECALL_API_KEY`` and ``RECALL_REGION``
+are required, ``RECALL_BOT_NAME`` and ``RECALL_OUTPUT_DIR`` are optional. A
+server handling several callers sets them per request with
+``recall_api.credentials`` instead. Call ``is_configured()`` if you would rather
+hide the tools than offer ones that cannot work.
 
 Every tool is one-shot and returns immediately. Recall work that takes time —
 the meeting running, the transcript being generated — is reported as
@@ -36,7 +37,7 @@ import logging
 from . import recall_api as api
 from . import schemas, tools, transcript
 
-__version__ = "2.1.0"
+__version__ = "3.0.0"
 
 logger = logging.getLogger(__name__)
 

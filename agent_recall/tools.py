@@ -25,6 +25,12 @@ from . import transcript as tx
 RETRY_BOT_SECONDS = 30
 RETRY_TRANSCRIPT_SECONDS = 15
 
+# Transcripts come back inline, a page of merged speaker turns at a time. The
+# default fits most meetings in one call; the ceiling keeps a single result from
+# swamping the model's context.
+DEFAULT_TRANSCRIPT_LIMIT = 200
+MAX_TRANSCRIPT_LIMIT = 1000
+
 # GET /bot/ has no `limit` parameter, so the page size is Recall's default.
 # Trim locally instead of handing the model a hundred rows it did not ask for.
 RECENT_BOT_LIMIT = 10
@@ -287,12 +293,8 @@ def list_bots(args):
 @handler
 def get_transcript(args):
     bot_id = api.validate_bot_id(args.get("bot_id"))
-
-    try:
-        preview_count = int(args.get("preview_utterances") or 20)
-    except (TypeError, ValueError):
-        preview_count = 20
-    preview_count = max(0, min(preview_count, 200))
+    offset = _int_arg(args, "offset", 0, 0, None)
+    limit = _int_arg(args, "limit", DEFAULT_TRANSCRIPT_LIMIT, 1, MAX_TRANSCRIPT_LIMIT)
 
     bot = api.request("GET", f"/bot/{bot_id}/")
     status = api.latest_status(bot).get("code")
@@ -358,24 +360,48 @@ def get_transcript(args):
 
     readable = tx.to_readable(parts)
     if not readable:
-        return _ok(status="done", bot_id=bot_id, utterances=0, speakers=[],
+        return _ok(status="done", bot_id=bot_id, speakers=[], total_utterances=0,
+                   has_more=False, next_offset=None, transcript="",
                    detail="The transcript is empty — nobody spoke, or no audio "
                           "was captured.")
 
-    text_path, raw_path = tx.write_outputs(bot_id, parts, readable)
-    names = tx.speakers(readable)
+    page = readable[offset:offset + limit]
+    end = offset + len(page)
+    has_more = end < len(readable)
 
-    return _ok(
-        status="done",
-        bot_id=bot_id,
-        transcript_id=transcript_id,
-        utterances=len(readable),
-        speakers=names,
-        transcript_path=str(text_path),
-        raw_path=str(raw_path),
-        preview=[tx.transcript_line(item) for item in readable[:preview_count]],
-        truncated=len(readable) > preview_count,
-    )
+    result = {
+        "status": "done",
+        "bot_id": bot_id,
+        "transcript_id": transcript_id,
+        "speakers": tx.speakers(readable),
+        "total_utterances": len(readable),
+        "offset": offset,
+        "limit": limit,
+        "has_more": has_more,
+        "next_offset": end if has_more else None,
+        "transcript": "\n\n".join(tx.transcript_line(item) for item in page),
+    }
+    if offset >= len(readable):
+        result["detail"] = (
+            f"offset {offset} is past the end; the transcript has "
+            f"{len(readable)} utterances.")
+
+    # Only on the first page, so paging through does not rewrite the files.
+    written = tx.write_outputs(bot_id, parts, readable) if offset == 0 else None
+    if written:
+        result["transcript_path"], result["raw_path"] = map(str, written)
+
+    return _ok(**result)
+
+
+def _int_arg(args, name: str, default: int, low: int, high):
+    """Read an optional integer argument, clamped; junk falls back to default."""
+    try:
+        value = int(args.get(name) if args.get(name) is not None else default)
+    except (TypeError, ValueError):
+        value = default
+    value = max(low, value)
+    return min(value, high) if high is not None else value
 
 
 def _start_transcription(recording_id: str) -> str:

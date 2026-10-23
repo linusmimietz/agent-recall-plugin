@@ -11,12 +11,14 @@ replaced, and time.sleep is recorded rather than slept.
 from __future__ import annotations
 
 import email.message
+import http.client
 import io
 import json
 import os
 import shutil
 import sys
 import tempfile
+import threading
 import unittest
 import urllib.error
 from pathlib import Path
@@ -25,7 +27,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import agent_recall
-from agent_recall import mcp_server, recall_api as api, tools
+from agent_recall import http_server, mcp_server, recall_api as api, tools
 from agent_recall import transcript as tx
 
 REPO = Path(__file__).resolve().parent.parent
@@ -590,6 +592,230 @@ class McpProtocolTests(ApiTestCase):
                 mock.patch.object(sys, "stdout", out):
             mcp_server.main()
         self.assertEqual(json.loads(out.getvalue())["id"], 1)
+
+
+# --------------------------------------------------------------------------
+# Transcripts come back inline, paged, and touch disk only when asked to
+# --------------------------------------------------------------------------
+
+class InlineTranscriptTests(ApiTestCase):
+    BOT = {
+        "id": BOT_ID,
+        "status_changes": [{"code": "done"}],
+        "recordings": [{"id": "rec", "media_shortcuts": {"transcript": {
+            "id": "tr", "data": {"download_url": "https://example.test/t.json"}}}}],
+    }
+
+    @staticmethod
+    def parts(count):
+        # Alternating speakers, so every entry stays its own turn.
+        return [{"participant": {"id": i % 2, "name": f"Speaker {i % 2}"},
+                 "words": [{"text": f"line {i}", "start_timestamp": {"relative": i}}]}
+                for i in range(count)]
+
+    def fetch(self, count=5, **args):
+        with mock.patch.object(api, "request", return_value=self.BOT), \
+                mock.patch.object(api, "download", return_value=self.parts(count)):
+            return json.loads(tools.get_transcript({"bot_id": BOT_ID, **args}))
+
+    def setUp(self):
+        super().setUp()
+        env = mock.patch.dict(os.environ, {"RECALL_OUTPUT_DIR": ""})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_full_text_is_inline(self):
+        result = self.fetch()
+        self.assertEqual(result["total_utterances"], 5)
+        self.assertFalse(result["has_more"])
+        self.assertIsNone(result["next_offset"])
+        self.assertEqual(result["transcript"].count("Speaker"), 5)
+        self.assertIn("[00:00:04] Speaker 0: line 4", result["transcript"])
+
+    def test_pages_cover_every_turn_exactly_once(self):
+        seen, offset = [], 0
+        while offset is not None:
+            page = self.fetch(offset=offset, limit=2)
+            seen += page["transcript"].split("\n\n")
+            offset = page["next_offset"]
+            self.assertEqual(page["has_more"], offset is not None)
+        self.assertEqual(seen, [f"[00:00:0{i}] Speaker {i % 2}: line {i}" for i in range(5)])
+
+    def test_offset_past_the_end_is_an_empty_page(self):
+        result = self.fetch(offset=99)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["transcript"], "")
+        self.assertFalse(result["has_more"])
+
+    def test_junk_paging_arguments_fall_back_to_defaults(self):
+        result = self.fetch(offset="x", limit=-3)
+        self.assertEqual(result["offset"], 0)
+        self.assertEqual(result["limit"], 1)
+
+    def test_nothing_is_written_without_an_output_dir(self):
+        with mock.patch.object(Path, "write_text") as write:
+            result = self.fetch()
+        write.assert_not_called()
+        self.assertNotIn("transcript_path", result)
+
+    def test_output_dir_opts_in_to_files(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        with mock.patch.dict(os.environ, {"RECALL_OUTPUT_DIR": directory}):
+            result = self.fetch()
+        self.assertTrue(Path(result["transcript_path"]).is_file())
+        self.assertTrue(Path(result["raw_path"]).is_file())
+
+
+# --------------------------------------------------------------------------
+# Per-request credentials
+# --------------------------------------------------------------------------
+
+class CredentialOverrideTests(ApiTestCase):
+    def test_override_wins_and_is_undone(self):
+        with api.credentials(RECALL_API_KEY="caller", RECALL_REGION=None):
+            self.assertEqual(api.api_key(), "caller")
+            self.assertEqual(api.region(), "us-east-1")  # env fills the gap
+        self.assertEqual(api.api_key(), "test-key")
+
+    def test_concurrent_requests_see_only_their_own_key(self):
+        barrier = threading.Barrier(2)
+        seen = {}
+
+        def run(key):
+            with api.credentials(RECALL_API_KEY=key):
+                barrier.wait()  # both overrides are live at once
+                seen[key] = api.api_key()
+
+        threads = [threading.Thread(target=run, args=(k,)) for k in ("a", "b")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(seen, {"a": "a", "b": "b"})
+
+
+# --------------------------------------------------------------------------
+# Streamable HTTP transport, driven over a real socket
+# --------------------------------------------------------------------------
+
+class HttpTransportTests(ApiTestCase):
+    def setUp(self):
+        super().setUp()
+        self.server = http_server.build_server("127.0.0.1", 0)
+        quiet = mock.patch.object(http_server.McpHandler, "log_message", lambda *a: None)
+        quiet.start()
+        self.addCleanup(quiet.stop)
+        thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+
+        # Recall itself is faked at urlopen, so the test sees the request the
+        # server would really have sent.
+        self.sent = []
+
+        def fake_urlopen(req, timeout=None):
+            self.sent.append(req)
+            return FakeResponse(json.dumps({"id": BOT_ID, "status_changes": []}).encode())
+
+        patcher = mock.patch.object(api.urllib.request, "urlopen", fake_urlopen)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def post(self, body, headers=None, path="/mcp", method="POST"):
+        if not isinstance(body, (str, bytes)):
+            body = json.dumps(body)
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=10)
+        self.addCleanup(conn.close)
+        conn.request(method, path, body=body if method == "POST" else None,
+                     headers={"Content-Type": "application/json", **(headers or {})})
+        response = conn.getresponse()
+        return response, response.read()
+
+    def authed(self, body, **headers):
+        return self.post(body, {"Authorization": "Bearer caller-key", **headers})
+
+    STATUS_CALL = {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                   "params": {"name": "recall_bot_status", "arguments": {"bot_id": BOT_ID}}}
+
+    def test_missing_key_is_refused_even_when_the_server_has_one(self):
+        for headers in ({}, {"Authorization": "Basic abc"}, {"Authorization": "Bearer "}):
+            with self.subTest(headers=headers):
+                response, _ = self.post(self.STATUS_CALL, headers)
+                self.assertEqual(response.status, 401)
+                self.assertEqual(response.getheader("WWW-Authenticate"), "Bearer")
+        self.assertEqual(self.sent, [])
+
+    def test_initialize(self):
+        response, body = self.authed({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                      "params": {"protocolVersion": "2025-06-18"}})
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Content-Type"), "application/json")
+        self.assertEqual(json.loads(body)["result"]["protocolVersion"], "2025-06-18")
+
+    def test_the_callers_key_reaches_recall(self):
+        response, body = self.authed(self.STATUS_CALL)
+        self.assertEqual(response.status, 200)
+        self.assertFalse(json.loads(body)["result"]["isError"])
+        req, = self.sent
+        self.assertEqual(req.get_header("Authorization"), "Token caller-key")
+        self.assertTrue(req.full_url.startswith("https://us-east-1.recall.ai/"))
+
+    def test_region_header_selects_the_region(self):
+        self.authed(self.STATUS_CALL, **{"X-Recall-Region": "eu-central-1"})
+        req, = self.sent
+        self.assertTrue(req.full_url.startswith("https://eu-central-1.recall.ai/"))
+
+    def test_hostile_region_header_never_becomes_a_url(self):
+        _, body = self.authed(self.STATUS_CALL, **{"X-Recall-Region": "evil.test/x"})
+        self.assertTrue(json.loads(body)["result"]["isError"])
+        self.assertEqual(self.sent, [])
+
+    def test_notification_is_accepted_without_a_body(self):
+        response, body = self.authed({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        self.assertEqual(response.status, 202)
+        self.assertEqual(body, b"")
+
+    def test_client_response_is_accepted_without_a_body(self):
+        response, body = self.authed({"jsonrpc": "2.0", "id": 3, "result": {}})
+        self.assertEqual(response.status, 202)
+        self.assertEqual(body, b"")
+
+    def test_unparseable_body_is_a_400_with_a_jsonrpc_error(self):
+        response, body = self.authed("{ not json")
+        self.assertEqual(response.status, 400)
+        self.assertEqual(json.loads(body)["error"]["code"], -32700)
+
+    def test_get_and_delete_are_not_offered(self):
+        for method in ("GET", "DELETE"):
+            with self.subTest(method=method):
+                response, _ = self.post(None, {"Authorization": "Bearer k"}, method=method)
+                self.assertEqual(response.status, 405)
+
+    def test_other_paths_are_not_found(self):
+        response, _ = self.post({"jsonrpc": "2.0", "id": 1, "method": "ping"},
+                                {"Authorization": "Bearer k"}, path="/")
+        self.assertEqual(response.status, 404)
+
+    def test_oversized_body_is_refused_unread(self):
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=10)
+        self.addCleanup(conn.close)
+        conn.putrequest("POST", "/mcp")
+        conn.putheader("Authorization", "Bearer k")
+        conn.putheader("Content-Length", str(http_server.MAX_BODY_BYTES + 1))
+        conn.endheaders()
+        self.assertEqual(conn.getresponse().status, 413)
+
+    def test_keep_alive_serves_several_requests(self):
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=10)
+        self.addCleanup(conn.close)
+        for msg_id in (1, 2):
+            conn.request("POST", "/mcp", body=json.dumps(
+                {"jsonrpc": "2.0", "id": msg_id, "method": "ping"}),
+                headers={"Authorization": "Bearer k"})
+            response = conn.getresponse()
+            self.assertEqual(json.loads(response.read())["id"], msg_id)
 
 
 # --------------------------------------------------------------------------

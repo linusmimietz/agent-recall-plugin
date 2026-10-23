@@ -1,5 +1,8 @@
 """MCP server over stdio — how Grok, Claude Code and Cursor get these tools.
 
+``http_server`` serves the same ``respond`` over Streamable HTTP, for hosts
+that connect by URL instead of spawning a process.
+
 Those hosts do not import Python plugins; they spawn an MCP server and speak
 JSON-RPC 2.0 to it. This module is that server, and it is deliberately thin: the
 tool table and handlers in this package are the implementation, and everything
@@ -114,6 +117,11 @@ def handle(message: dict):
     if "id" not in message:
         return None
 
+    # A response to a request of ours. This server sends none, so there is
+    # nothing to match it to, and answering a response is never valid.
+    if "method" not in message and ("result" in message or "error" in message):
+        return None
+
     msg_id = message["id"]
     if msg_id is None or not isinstance(msg_id, (str, int)) or isinstance(msg_id, bool):
         return _error(None, -32600, "Invalid Request: id must be a string or number")
@@ -145,6 +153,27 @@ def handle(message: dict):
     return _error(msg_id, -32601, f"Method not found: {method}")
 
 
+def respond(raw: str):
+    """Answer one serialised JSON-RPC message, whatever transport carried it.
+
+    Returns the response object, or None when there is nothing to send back.
+    """
+    try:
+        message = json.loads(raw)
+    except json.JSONDecodeError:
+        return _error(None, -32700, "Parse error")
+
+    if not isinstance(message, dict):
+        # Batches were removed from the MCP spec; one object per message.
+        return _error(None, -32600, "Invalid Request: expected a single object")
+
+    try:
+        return handle(message)
+    except Exception as err:  # pragma: no cover — a crash would kill the server
+        return _error(message.get("id"), -32603,
+                      f"Internal error: {type(err).__name__}: {err}")
+
+
 # --------------------------------------------------------------------------
 # Entry point
 # --------------------------------------------------------------------------
@@ -165,24 +194,7 @@ def main(argv=None) -> int:
         if not line:
             continue
 
-        try:
-            message = json.loads(line)
-        except json.JSONDecodeError:
-            _write(_error(None, -32700, "Parse error"))
-            continue
-
-        if not isinstance(message, dict):
-            # Batches were removed from the MCP spec; one object per line.
-            _write(_error(None, -32600, "Invalid Request: expected a single object"))
-            continue
-
-        try:
-            response = handle(message)
-        except Exception as err:  # pragma: no cover — a crash would kill the server
-            _write(_error(message.get("id"), -32603,
-                          f"Internal error: {type(err).__name__}: {err}"))
-            continue
-
+        response = respond(line)
         if response is not None:
             _write(response)
 

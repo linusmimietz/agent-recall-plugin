@@ -83,7 +83,10 @@ GET_TRANSCRIPT = {
         "Returns immediately and never blocks. If the transcript is not ready it "
         "returns status 'processing' with retry_after_seconds — call again after "
         "roughly that long rather than waiting. When ready, returns status 'done' "
-        "with the speakers, a preview, and the path to the saved transcript.\n\n"
+        "with the speakers and the transcript text itself, one '[hh:mm:ss] "
+        "Speaker: text' paragraph per speaker turn.\n\n"
+        "Long transcripts come in pages: if has_more is true, call again with "
+        "offset set to next_offset until it is false.\n\n"
         "Safe to call repeatedly: an existing transcript is reused rather than "
         "re-transcribed (which would cost money again)."
     ),
@@ -91,11 +94,18 @@ GET_TRANSCRIPT = {
         "type": "object",
         "properties": {
             "bot_id": {"type": "string", "description": "Bot id from recall_schedule_bot."},
-            "preview_utterances": {
+            "offset": {
                 "type": "integer",
                 "description": (
-                    "How many utterances to include inline in the result "
-                    "(default 20). The full transcript is always written to disk."
+                    "Index of the first speaker turn to return (default 0). "
+                    "Pass the previous result's next_offset to read on."
+                ),
+            },
+            "limit": {
+                "type": "integer",
+                "description": (
+                    "Most speaker turns to return in one result "
+                    "(default 200, at most 1000)."
                 ),
             },
         },

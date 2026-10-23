@@ -12,17 +12,15 @@ import json
 import os
 from pathlib import Path
 
-# Agents lay out their workspaces differently, so the destination is
-# configuration rather than something inferred from the host: RECALL_OUTPUT_DIR
-# is what a host — or a test — sets to redirect transcripts out of the default
-# tree.
-DEFAULT_OUTPUT_DIR = Path.home() / ".agent" / "workspace" / "recall"
+# Transcripts are returned inline, so writing them to disk is opt-in: a server
+# shared by many callers must not keep each one's meetings on its own disk. A
+# local agent that wants files sets RECALL_OUTPUT_DIR to its workspace.
 
 
-def base_dir() -> Path:
-    """The transcript root: ``$RECALL_OUTPUT_DIR``, else the default tree."""
-    override = (os.environ.get("RECALL_OUTPUT_DIR") or "").strip()
-    return Path(override).expanduser() if override else DEFAULT_OUTPUT_DIR
+def base_dir():
+    """The transcript root, ``$RECALL_OUTPUT_DIR``, or None when it is unset."""
+    configured = (os.environ.get("RECALL_OUTPUT_DIR") or "").strip()
+    return Path(configured).expanduser() if configured else None
 
 
 def _safe_segment(bot_id: str) -> str:
@@ -39,9 +37,10 @@ def _safe_segment(bot_id: str) -> str:
     return segment
 
 
-def output_dir(bot_id: str) -> Path:
-    """Where transcripts land: ``$RECALL_OUTPUT_DIR/<bot_id>/``."""
-    return base_dir() / _safe_segment(bot_id)
+def output_dir(bot_id: str):
+    """Where transcripts land: ``$RECALL_OUTPUT_DIR/<bot_id>/``, or None."""
+    base = base_dir()
+    return base / _safe_segment(bot_id) if base is not None else None
 
 
 def participant_key(participant: dict):
@@ -123,8 +122,13 @@ def _write_atomic(path: Path, text: str) -> None:
 
 
 def write_outputs(bot_id: str, raw_parts, readable):
-    """Write both the readable transcript and the raw JSON. Returns their paths."""
+    """Write both the readable transcript and the raw JSON. Returns their paths.
+
+    Returns None, writing nothing, when ``RECALL_OUTPUT_DIR`` is unset.
+    """
     directory = output_dir(bot_id)
+    if directory is None:
+        return None
     directory.mkdir(parents=True, exist_ok=True)
 
     raw_path = directory / "transcript.json"

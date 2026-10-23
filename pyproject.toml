@@ -36,6 +36,8 @@ Homepage = "https://github.com/linusmimietz/agent-recall-plugin"
 agent-recall = "agent_recall.cli:main"
 # Hosts that take tools over MCP (Grok, Claude Code, Cursor) spawn this one.
 agent-recall-mcp = "agent_recall.mcp_server:main"
+# Hosts that connect by URL instead (Grok Team Bot) talk to this one.
+agent-recall-http = "agent_recall.http_server:main"
 
 [tool.setuptools]
 packages = ["agent_recall"]

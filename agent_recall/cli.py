@@ -41,8 +41,12 @@ def build_parser() -> argparse.ArgumentParser:
     transcript = subs.add_parser("transcript", help="Fetch a bot's transcript")
     transcript.add_argument("bot_id")
     transcript.add_argument(
-        "--preview", type=int, default=20,
-        help="Utterances to print inline (default 20)",
+        "--offset", type=int, default=0,
+        help="First speaker turn to print (default 0)",
+    )
+    transcript.add_argument(
+        "--limit", type=int, default=None,
+        help="Most speaker turns to print (default 200, at most 1000)",
     )
 
     cancel = subs.add_parser("cancel", help="Unschedule a bot or pull it from the call")
@@ -58,7 +62,7 @@ def _emit(raw: str) -> int:
         print(f"error: {payload.get('error')}")
         return 1
 
-    preview = payload.pop("preview", None)
+    text = payload.pop("transcript", None)
     payload.pop("success", None)
     for key, value in payload.items():
         if isinstance(value, list) and value and isinstance(value[0], dict):
@@ -69,10 +73,9 @@ def _emit(raw: str) -> int:
             print(f"{key}: {', '.join(str(v) for v in value)}")
         else:
             print(f"{key}: {value}")
-    if preview:
+    if text:
         print()
-        for line in preview:
-            print(line)
+        print(text)
     return 0
 
 
@@ -105,7 +108,7 @@ def main(argv=None) -> int:
         return _emit(tools.bot_status({"bot_id": args.bot_id}))
     if args.command == "transcript":
         return _emit(tools.get_transcript(
-            {"bot_id": args.bot_id, "preview_utterances": args.preview}))
+            {"bot_id": args.bot_id, "offset": args.offset, "limit": args.limit}))
     if args.command == "cancel":
         return _emit(tools.cancel_bot({"bot_id": args.bot_id}))
 

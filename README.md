@@ -5,8 +5,9 @@ bot into a Zoom, Google Meet or Microsoft Teams call to record it, then fetches
 a **speaker-labelled transcript** afterwards.
 
 Stdlib-only Python. Plugs into [Grok](https://docs.x.ai/build/features/skills-plugins-marketplaces),
-Claude Code and Cursor as an **MCP server**, or drops into your own agent loop as
-a tool table and a dispatcher.
+Claude Code and Cursor as an **MCP server** — spawned over stdio, or reached by
+URL over Streamable HTTP — or drops into your own agent loop as a tool table and
+a dispatcher.
 
 Explicit by design: the bot only joins meeting URLs you pass it. No calendar
 scanning, no auto-dial.
@@ -66,6 +67,58 @@ env = { RECALL_API_KEY = "${RECALL_API_KEY}", RECALL_REGION = "us-east-1" }
 Check it with `grok mcp doctor recall`, then `/mcps` in the TUI to see the five
 tools.
 
+### Grok Team Bot (and other URL-based hosts)
+
+A Team Bot cannot pass secrets to a command it spawns, so the stdio server above
+never sees a key there. Instead run the HTTP server and connect to it by URL,
+with the key in a header:
+
+```bash
+pip install git+https://github.com/linusmimietz/agent-recall-plugin
+agent-recall-http        # serves http://127.0.0.1:8000/mcp
+```
+
+Each request carries its caller's credentials; the server stores none.
+
+| Header | Required | |
+|---|---|---|
+| `Authorization: Bearer <key>` | yes | Recall API key. Requests without one get `401`. |
+| `X-Recall-Region` | unless the server has `RECALL_REGION` | e.g. `eu-central-1` |
+| `X-Recall-Bot-Name` | no | Falls back to `RECALL_BOT_NAME`, then `Agent Notetaker` |
+
+The server's own `RECALL_API_KEY` is never used for an HTTP request, so nobody
+can spend the host's key by leaving theirs out.
+
+From the Grok CLI that is:
+
+```bash
+grok mcp add --transport http recall http://127.0.0.1:8000/mcp \
+  --header "Authorization: Bearer ${RECALL_API_KEY}" \
+  --header "X-Recall-Region: eu-central-1"
+```
+
+If you already added the stdio `recall` server, remove it first
+(`grok mcp remove recall`) or give this one another name. In a Team Bot, give
+it the same URL and headers.
+
+**Local or hosted.** By default the server binds `127.0.0.1:8000` (`--host`,
+`--port`, or `HOST`/`PORT`), which works when the agent's MCP client runs on the
+same machine and the process stays up. If the Team Bot cannot reach a loopback
+URL, deploy the bundled `Dockerfile` to any container host that terminates TLS —
+Fly.io, Render, Cloud Run, or a Cloudflare Tunnel — and use its
+`https://…/mcp` URL. The image binds `0.0.0.0:$PORT` and needs no secrets:
+
+```bash
+docker build -t agent-recall .
+docker run -p 8080:8080 agent-recall      # then POST to http://localhost:8080/mcp
+```
+
+Never expose it over plain HTTP beyond your machine: the key is in a header.
+
+The endpoint is stateless Streamable HTTP: `POST /mcp` takes one JSON-RPC
+message and returns its JSON response (`202` with no body for a notification).
+There are no sessions and no SSE stream, so `GET`/`DELETE` return `405`.
+
 ### As a Python library
 
 ```bash
@@ -82,14 +135,16 @@ pip install -e .
 
 ## Configuration
 
-All configuration is environment-driven — nothing is stored in this repo.
+All configuration is environment-driven — nothing is stored in this repo. The
+HTTP server takes the key (and optionally region and bot name) from request
+headers instead; see above.
 
 | Variable | Required | Description |
 |---|---|---|
 | `RECALL_API_KEY` | yes | Recall.ai API key. **Region-scoped.** |
 | `RECALL_REGION` | yes | `us-east-1`, `us-west-2`, `eu-central-1` or `ap-northeast-1` ([docs](https://docs.recall.ai/docs/regions)) |
 | `RECALL_BOT_NAME` | no | Display name in the meeting. Default `Agent Notetaker`. |
-| `RECALL_OUTPUT_DIR` | no | Where transcripts are written. Default `~/.agent/workspace/recall`. |
+| `RECALL_OUTPUT_DIR` | no | Also write each transcript to disk here. Unset by default: nothing is written. |
 
 > **Region matters.** Keys, bots, recordings and transcripts all live in exactly
 > one Recall region. A key used against the wrong region returns `401` with no
@@ -157,10 +212,15 @@ into your system prompt.
 | `recall_get_transcript` | Start transcription and fetch the result |
 | `recall_cancel_bot` | Unschedule, or pull a bot out of a call |
 
-Transcripts are written to `$RECALL_OUTPUT_DIR/<bot_id>/` — by default
-`~/.agent/workspace/recall/<bot_id>/` — as `transcript.txt` (readable) and
-`transcript.json` (raw). Point `RECALL_OUTPUT_DIR` at your agent's workspace if
-it keeps one — e.g. `$GROK_HOME/workspace/recall` under Grok.
+`recall_get_transcript` returns the speaker-labelled text in the tool result,
+one `[hh:mm:ss] Speaker: text` paragraph per turn. Long transcripts are paged:
+while `has_more` is true, call again with `offset` set to `next_offset`
+(`limit` defaults to 200 turns, at most 1000).
+
+Nothing is written to disk unless you set `RECALL_OUTPUT_DIR`; then the first
+page also writes `<dir>/<bot_id>/transcript.txt` (readable) and
+`transcript.json` (raw) and returns their paths. Leave it unset on a shared
+server, so it does not keep other people's meetings.
 
 ## CLI
 
@@ -170,7 +230,7 @@ The same operations from a terminal, for testing and one-off scheduling:
 agent-recall schedule 'https://zoom.us/j/123?pwd=abc' +45m
 agent-recall list
 agent-recall status <bot_id>
-agent-recall transcript <bot_id>
+agent-recall transcript <bot_id> [--offset N] [--limit N]
 agent-recall cancel <bot_id>
 ```
 
@@ -215,8 +275,9 @@ would downgrade that, so the plugin doesn't.
 **Stdlib only.** No third-party HTTP dependency — and no MCP SDK either. The
 stdio transport is newline-delimited JSON-RPC, so `agent_recall/mcp_server.py`
 implements the four methods a host actually calls (`initialize`, `ping`,
-`tools/list`, `tools/call`) in under 200 lines, and installing this adds nothing
-to your agent's dependency tree.
+`tools/list`, `tools/call`) in about 200 lines, and installing this adds nothing
+to your agent's dependency tree. `agent_recall/http_server.py` serves the same
+handler over Streamable HTTP with `http.server`.
 
 **Tool failures are results, not protocol errors.** A failed call comes back as
 content with `isError: true`, so the model reads the reason and corrects itself.
